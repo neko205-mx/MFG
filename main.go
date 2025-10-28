@@ -1,33 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
-	"strconv"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/spf13/pflag"
 )
-
-// PortInfo 对应 "ports" 数组中的对象
-type PortInfo struct {
-	Port   int    `json:"port"`
-	Proto  string `json:"proto"`
-	Status string `json:"status"`
-	Reason string `json:"reason"`
-	Ttl    int    `json:"ttl"`
-}
-
-// ScanResult 对应顶层数组中的对象
-type ScanResult struct {
-	Ip        string     `json:"ip"`
-	Timestamp string     `json:"timestamp"`
-	Ports     []PortInfo `json:"ports"`
-}
 
 func main() {
 	var ports string
@@ -35,13 +15,20 @@ func main() {
 	var rate int
 	var savePath string
 	var mode string
+	var help bool
 
+	pflag.BoolVarP(&help, "help", "h", false, "显示帮助信息")
 	pflag.IntVarP(&rate, "rate", "r", 1000, "扫描速率")
 	pflag.StringVarP(&ports, "ports", "p", "80,443", "要扫描的端口")
 	pflag.StringVarP(&ip, "ip", "i", "", "ip范围")
 	pflag.StringVarP(&savePath, "save", "s", "./output.json", "结果保存路径")
 	pflag.StringVarP(&mode, "mode", "m", "scan", "功能选择")
 	pflag.Parse()
+
+	if help {
+		pflag.Usage()
+		return
+	}
 
 	switch mode {
 	case "scan":
@@ -58,7 +45,7 @@ func main() {
 		}
 		log.Println("数据库连接成功")
 		defer db.Close()
-		jsonData := runCommand(ip, ports, rate)
+		jsonData := runCommand(ip, ports, rate, savePath)
 
 		err = saveToDB(db, jsonData)
 		if err != nil {
@@ -74,129 +61,42 @@ func main() {
 		defer db.Close()
 		fmt.Println("--- 数据库初始化完成 ---")
 
+	case "query":
+		fmt.Println("--- 查询 ---")
+		db, err := sqlx.Connect("sqlite3", "./ips.db")
+		if err != nil {
+			log.Fatalf("数据库连接失败: %v", err)
+		}
+		log.Println("数据库连接成功")
+		defer db.Close()
+
+		if !pflag.CommandLine.Changed("ip") && !pflag.CommandLine.Changed("ports") {
+			log.Fatalf("必须提供 -ip 或 -ports 参数")
+		} else if pflag.CommandLine.Changed("ip") && pflag.CommandLine.Changed("ports") {
+			log.Fatalf("不能同时提供 -ip 和 -ports 参数")
+		}
+
+		var results []string
+		if pflag.CommandLine.Changed("ip") {
+			results, err = queryByIP(db, ip)
+		} else {
+			results, err = queryByPort(db, ports)
+		}
+
+		if err != nil {
+			log.Fatalf("查询失败: %v", err)
+		}
+
+		if len(results) > 0 {
+			fmt.Println("\n查询结果:")
+			for _, line := range results {
+				fmt.Println(line)
+			}
+			fmt.Printf("\n总计: %d 条记录\n", len(results))
+		}
+
 	default:
 		log.Fatalf("未知模式: %s", mode)
 	}
-
-}
-
-// 初始化数据库连接
-func initDB(dbPatch string) (*sqlx.DB, error) {
-	db, err := sqlx.Open("sqlite3", dbPatch)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite database: %w", err)
-	}
-	newTable := `
-    CREATE TABLE IF NOT EXISTS scan_results (
-        id             INTEGER PRIMARY KEY AUTOINCREMENT,
-        ip             TEXT NOT NULL,
-        port           INTEGER NOT NULL,
-        proto          TEXT NOT NULL,
-        ttl            INTEGER,
-        reason         TEXT,
-        scan_time_unix INTEGER NOT NULL
-    );`
-	_, err = db.Exec(newTable)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("create table Err: %v", err)
-	}
-	fmt.Println("-- new db successfully --")
-	return db, nil
-}
-
-func runCommand(ip string, ports string, rate int) []byte {
-
-	rateStr := strconv.Itoa(rate)
-
-	args := []string{
-		"-p", ports,
-		"--rate", rateStr,
-		ip,
-		"-oJ", "scan_results.json",
-	}
-	log.Printf("执行命令: masscan %v", args)
-	cmd := exec.Command("masscan", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	err := cmd.Run()
-	if err != nil {
-		log.Fatalf("命令执行失败: %v", err)
-	}
-	log.Println("扫描完成，结果已保存到 scan_results.json")
-
-	jsonFile, err := os.ReadFile("scan_results.json")
-	if err != nil {
-		log.Fatalf("无法打开 JSON 文件: %v", err)
-	}
-
-	return jsonFile
-}
-
-func saveToDB(db *sqlx.DB, jsonData []byte) error {
-
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("开始事务失败: %w", err)
-	}
-	defer tx.Rollback()
-
-	insertSql := `INSERT INTO scan_results (ip, port, proto, ttl, reason, scan_time_unix)
-				VALUES (?, ?, ?, ?, ?, ?)`
-	// deleteSql := `DELETE FROM scan_results WHERE ip = ? `
-
-	// 解析 处理 JSON 数据
-	var results []ScanResult
-
-	err = json.Unmarshal(jsonData, &results)
-	if err != nil {
-		return fmt.Errorf("JSON 解析失败: %w", err)
-	}
-
-	// 用于记录已删除的 IP，避免重复删除
-	deleteIpMap := make(map[string]bool)
-
-	for _, result := range results {
-
-		if !deleteIpMap[result.Ip] {
-			 log.Printf("删除旧记录: IP %s", result.Ip)
-			_, err := tx.Exec(`DELETE FROM scan_results WHERE ip = ?`, result.Ip)
-			if err != nil {
-				log.Printf("删除旧记录失败: %v", err)
-				continue
-			}
-			deleteIpMap[result.Ip] = true
-		}
-
-		// 插入新的扫描结果
-		log.Printf("插入新记录: IP %s", result.Ip)
-		timestamp, err := strconv.ParseInt(result.Timestamp, 10, 64)
-		if err != nil {
-			log.Printf("时间戳解析失败: %v", err)
-			continue
-		}
-
-		for _, portInfo := range result.Ports {
-			_, err := tx.Exec(insertSql,
-				result.Ip,
-				portInfo.Port,
-				portInfo.Proto,
-				portInfo.Ttl,
-				portInfo.Reason,
-				timestamp,
-			)
-			if err != nil {
-				log.Printf("插入数据库失败: %v", err)
-				continue
-			}
-		}
-	}
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("提交事务失败: %w", err)
-	}
-	log.Println("save to db successfully")
-	return nil
 
 }
