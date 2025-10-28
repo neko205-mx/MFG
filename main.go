@@ -67,7 +67,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("数据库连接失败: %v", err)
 		}
-		log.Println("数据库连接成功")
 		defer db.Close()
 
 		if !pflag.CommandLine.Changed("ip") && !pflag.CommandLine.Changed("ports") {
