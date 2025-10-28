@@ -35,7 +35,6 @@ func main() {
 	var rate int
 	var savePath string
 	var mode string
-	
 
 	pflag.IntVarP(&rate, "rate", "r", 1000, "扫描速率")
 	pflag.StringVarP(&ports, "ports", "p", "80,443", "要扫描的端口")
@@ -136,18 +135,42 @@ func runCommand(ip string, ports string, rate int) []byte {
 }
 
 func saveToDB(db *sqlx.DB, jsonData []byte) error {
-	sql := `INSERT INTO scan_results (ip, port, proto, ttl, reason, scan_time_unix)
-			VALUES (?, ?, ?, ?, ?, ?)`
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	insertSql := `INSERT INTO scan_results (ip, port, proto, ttl, reason, scan_time_unix)
+				VALUES (?, ?, ?, ?, ?, ?)`
+	// deleteSql := `DELETE FROM scan_results WHERE ip = ? `
 
 	// 解析 处理 JSON 数据
 	var results []ScanResult
-	err := json.Unmarshal(jsonData, &results)
+
+	err = json.Unmarshal(jsonData, &results)
 	if err != nil {
 		return fmt.Errorf("JSON 解析失败: %w", err)
 	}
 
+	// 用于记录已删除的 IP，避免重复删除
+	deleteIpMap := make(map[string]bool)
+
 	for _, result := range results {
 
+		if !deleteIpMap[result.Ip] {
+			 log.Printf("删除旧记录: IP %s", result.Ip)
+			_, err := tx.Exec(`DELETE FROM scan_results WHERE ip = ?`, result.Ip)
+			if err != nil {
+				log.Printf("删除旧记录失败: %v", err)
+				continue
+			}
+			deleteIpMap[result.Ip] = true
+		}
+
+		// 插入新的扫描结果
+		log.Printf("插入新记录: IP %s", result.Ip)
 		timestamp, err := strconv.ParseInt(result.Timestamp, 10, 64)
 		if err != nil {
 			log.Printf("时间戳解析失败: %v", err)
@@ -155,7 +178,7 @@ func saveToDB(db *sqlx.DB, jsonData []byte) error {
 		}
 
 		for _, portInfo := range result.Ports {
-			_, err := db.Exec(sql,
+			_, err := tx.Exec(insertSql,
 				result.Ip,
 				portInfo.Port,
 				portInfo.Proto,
@@ -168,6 +191,10 @@ func saveToDB(db *sqlx.DB, jsonData []byte) error {
 				continue
 			}
 		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
 	}
 	log.Println("save to db successfully")
 	return nil
