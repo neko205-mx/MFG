@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	_ "github.com/mattn/go-sqlite3"
+
 	"github.com/jmoiron/sqlx"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // 初始化数据库连接
@@ -17,7 +18,6 @@ func initDB(dbPatch string) (*sqlx.DB, error) {
 	}
 	newTable := `
     CREATE TABLE IF NOT EXISTS scan_results (
-        id             INTEGER PRIMARY KEY AUTOINCREMENT,
         ip             TEXT NOT NULL,
         port           INTEGER NOT NULL,
         proto          TEXT NOT NULL,
@@ -110,17 +110,28 @@ func formatResults(results []ipPortResult) []string {
 }
 
 // 根据 IP 查询信息
-func queryByIP(db *sqlx.DB, ip string) ([]string, error) {
+func queryByIP(db *sqlx.DB, ip []string) ([]string, error) {
 	var results []ipPortResult
-	sql := `SELECT DISTINCT ip, port FROM scan_results WHERE ip = ? ORDER BY port`
-	err := db.Select(&results, sql, ip)
-	if err != nil {
-		return nil, fmt.Errorf("查询失败: %w", err)
+
+	if len(ip) == 0 {
+		return nil, fmt.Errorf("no ip address")
 	}
 
-	if len(results) == 0 {
-		log.Printf("未找到IP %s 的扫描记录", ip)
-		return nil, nil
+	sql := `SELECT DISTINCT ip, port FROM scan_results WHERE ip IN (?) ORDER BY ip, port`
+
+	// 查询语句和参数列表
+	query, args, err := sqlx.In(sql, ip)
+	if err != nil {
+		return nil, err
+	}
+
+	// 绑定语句
+	query = db.Rebind(query)
+
+	// 查询
+	err = db.Select(&results, query, args...)
+	if err != nil {
+		return nil, err
 	}
 
 	return formatResults(results), nil
@@ -128,21 +139,38 @@ func queryByIP(db *sqlx.DB, ip string) ([]string, error) {
 }
 
 // 根据端口查询信息
-func queryByPort(db *sqlx.DB, portStr string) ([]string, error) {
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, fmt.Errorf("端口转换失败: %w", err)
+func queryByPort(db *sqlx.DB, portStrs []string) ([]string, error) {
+
+	if len(portStrs) == 0 {
+		return nil, fmt.Errorf("no Ports")
+	}
+
+	ports := make([]int, 0, len(portStrs))
+	for _, portStr := range portStrs {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, fmt.Errorf("err")
+		}
+		ports = append(ports, port)
 	}
 
 	var results []ipPortResult
-	sql := `SELECT DISTINCT ip, port FROM scan_results WHERE port = ? ORDER BY ip`
-	err = db.Select(&results, sql, port)
+
+	sql := `SELECT DISTINCT ip, port FROM scan_results WHERE port IN (?) ORDER BY ip`
+
+	query, args, err := sqlx.In(sql, ports)
 	if err != nil {
-		return nil, fmt.Errorf("查询失败: %w", err)
+		return nil, fmt.Errorf("SQL IN Err")
 	}
 
+	query = db.Rebind(query)
+
+	err = db.Select(&results, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("SQL SELECT Err")
+	}
 	if len(results) == 0 {
-		log.Printf("未找到端口 %d 的扫描记录", port)
+		log.Printf("未找到指定端口 %v 的扫描记录", ports)
 		return nil, nil
 	}
 

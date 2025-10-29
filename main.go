@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
+	"os"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -27,6 +30,7 @@ func main() {
 
 	if help {
 		pflag.Usage()
+		fmt.Println("mode init, scan, query \n 使用方法 --mode query --ip/ports 1.1.1.1")
 		return
 	}
 
@@ -78,9 +82,15 @@ func main() {
 
 		var results []string
 		if pflag.CommandLine.Changed("ip") {
-			results, err = queryByIP(db, ip)
+			_, _, err := net.ParseCIDR(ip)
+			if err == nil {
+				results, err = queryByIP(db, Crid2ips(strings.Split(ip, ",")))
+			} else {
+				results, err = queryByIP(db, strings.Split(ip, ","))
+			}
+
 		} else {
-			results, err = queryByPort(db, ports)
+			results, err = queryByPort(db, strings.Split(ports, ","))
 		}
 
 		if err != nil {
@@ -95,8 +105,46 @@ func main() {
 			fmt.Printf("\n总计: %d 条记录\n", len(results))
 		}
 
+		fmt.Printf("正在写入%s\n", savePath)
+		fileData := []byte(strings.Join(results, "\n"))
+		err = os.WriteFile(savePath, fileData, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatalf("未知模式: %s", mode)
 	}
 
+}
+
+// Crid2ips crid to ips
+func Crid2ips(crid []string) []string {
+	var ips []string
+
+	ipAddr, ipNet, err := net.ParseCIDR(crid[0])
+
+	if err != nil {
+		log.Print(err)
+	}
+
+	for ip := ipAddr.Mask(ipNet.Mask); ipNet.Contains(ip); increment(ip) {
+		ips = append(ips, ip.String())
+	}
+
+	// CIDR too small eg. /31
+	if len(ips) <= 2 {
+		log.Print("err")
+	}
+
+	return ips
+}
+
+// increment 配合Crid2ips使用
+func increment(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
 }
